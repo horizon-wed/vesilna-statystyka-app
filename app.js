@@ -104,8 +104,12 @@ function load() {
   try { const raw = localStorage.getItem(KEY); if (raw) return normalize(JSON.parse(raw)); } catch (e) { console.error(e); }
   return defaults();
 }
-function save() {
+function saveLocal() {
   try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) { toast('Не вдалося зберегти дані на пристрої'); console.error(e); }
+}
+function save() {
+  saveLocal();
+  if (window.Sync) window.Sync.push();
 }
 let db = load();
 save();
@@ -319,7 +323,9 @@ function enableSwipe(wrap, onSwipe) {
 }
 
 /* ================= Навігація ================= */
-const state = { tab: 'orders', stack: [], year: new Date().getFullYear(), search: '', progressFilter: 'all' };
+const CLOUD = !!window.FIREBASE_CONFIG;
+const state = { tab: 'orders', stack: [], year: new Date().getFullYear(), search: '', progressFilter: 'all',
+  auth: CLOUD ? 'loading' : 'local', email: '', authError: '', syncInfo: '' };
 
 function push(name, params = {}) { state.stack.push({ name, params }); render(); window.scrollTo(0, 0); }
 async function pop() {
@@ -332,6 +338,8 @@ async function pop() {
 }
 
 function render() {
+  pendingRender = false;
+  if (CLOUD && state.auth !== 'signedIn') return renderAuth();
   const top = state.stack[state.stack.length - 1];
   const res = top ? screens[top.name](top.params, top) : screens[state.tab]();
   const left = document.getElementById('leftBtn');
@@ -340,6 +348,7 @@ function render() {
   else if (state.tab === 'orders') { left.innerHTML = ICON.plus; left.classList.add('plus'); left.setAttribute('aria-label', 'Нове замовлення'); left.onclick = () => push('orderForm', { id: null }); }
   else { left.innerHTML = ''; left.classList.add('invisible'); left.onclick = null; }
   document.getElementById('tabs').hidden = !!top;
+  document.getElementById('settingsBtn').hidden = false;
   const title = document.getElementById('title');
   title.hidden = !top; title.textContent = res.title || '';
   document.getElementById('settingsBtn').classList.toggle('invisible', !!top);
@@ -348,6 +357,105 @@ function render() {
   main.innerHTML = res.html;
   if (res.mount) res.mount(main);
 }
+
+/* ================= Спільний доступ (вхід) ================= */
+function renderAuth() {
+  const left = document.getElementById('leftBtn');
+  left.className = 'iconbtn invisible'; left.innerHTML = ''; left.onclick = null;
+  document.getElementById('tabs').hidden = true;
+  document.getElementById('settingsBtn').hidden = true;
+  const title = document.getElementById('title'); title.hidden = false; title.textContent = 'Весільні замовлення';
+  const main = document.getElementById('main');
+  if (state.auth === 'signedOut') {
+    main.innerHTML = `<form class="form" id="loginForm" novalidate style="max-width:420px;margin:24px auto 0">
+      <div style="text-align:center;margin-bottom:6px"><img src="icon-180.png" alt="" width="72" height="72" style="border-radius:18px"></div>
+      <div class="note" style="text-align:center;font-size:15px">Увійдіть, щоб бачити й редагувати спільні записи.</div>
+      <div class="field"><label for="lEmail">Пошта</label><input class="input" id="lEmail" type="email" autocomplete="username" inputmode="email" autocapitalize="off" value="${esc(state.email)}"></div>
+      <div class="field"><label for="lPass">Пароль</label><input class="input" id="lPass" type="password" autocomplete="current-password"></div>
+      <div class="err" id="lErr" ${state.authError ? '' : 'hidden'} style="color:var(--danger);font-size:14px;padding-left:4px">${esc(state.authError)}</div>
+      <button class="btn" type="submit" id="lBtn">Увійти</button>
+      <button class="btn secondary" type="button" id="lReset">Забули пароль?</button>
+    </form>`;
+    const err = m => { const e = main.querySelector('#lErr'); e.textContent = m; e.hidden = !m; };
+    main.querySelector('#loginForm').onsubmit = async ev => {
+      ev.preventDefault();
+      const email = main.querySelector('#lEmail').value.trim(), pass = main.querySelector('#lPass').value;
+      if (!email || !pass) { err('Введіть пошту й пароль'); return; }
+      if (!window.Sync) { err('Модуль синхронізації ще завантажується. Спробуйте за кілька секунд.'); return; }
+      const b = main.querySelector('#lBtn'); b.disabled = true; b.textContent = 'Входимо…';
+      state.email = email;
+      try { await window.Sync.signIn(email, pass); state.authError = ''; }
+      catch (e) { b.disabled = false; b.textContent = 'Увійти'; err(authMessage(e)); }
+    };
+    main.querySelector('#lReset').onclick = async () => {
+      const email = main.querySelector('#lEmail').value.trim();
+      if (!email) { err('Спершу введіть свою пошту вище'); return; }
+      try { await window.Sync.reset(email); toast('Лист для зміни пароля надіслано'); } catch (e) { err(authMessage(e)); }
+    };
+    return;
+  }
+  main.innerHTML = `<div class="empty" style="margin-top:24px"><b>${state.authError ? 'Не вдалося завантажити дані' : 'Завантаження спільних даних…'}</b>${esc(state.authError || 'Зачекайте кілька секунд.')}
+    ${state.auth === 'syncing' ? '<div style="margin-top:16px"><button class="btn secondary small" id="authOut">Вийти з акаунта</button></div>' : ''}</div>`;
+  const o = main.querySelector('#authOut'); if (o) o.onclick = () => window.Sync && window.Sync.signOut();
+}
+function authMessage(e) {
+  const c = (e && e.code) || '';
+  if (/invalid-credential|wrong-password|user-not-found|invalid-email|invalid-login/.test(c)) return 'Невірна пошта або пароль.';
+  if (/too-many-requests/.test(c)) return 'Забагато спроб. Зачекайте кілька хвилин.';
+  if (/network/.test(c)) return 'Немає інтернету. Для першого входу потрібне з’єднання.';
+  if (/user-disabled/.test(c)) return 'Цей акаунт вимкнено.';
+  return 'Не вдалося увійти (' + (c || 'помилка') + ').';
+}
+
+let pendingRender = false;
+function isEditing() {
+  const top = state.stack[state.stack.length - 1];
+  if (top && top.dirty) return true;
+  const a = document.activeElement;
+  return !!a && document.getElementById('main').contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
+}
+function softRender() {
+  const top = state.stack[state.stack.length - 1];
+  if (top && top.draft && !top.dirty) top.draft = null;
+  if (isEditing()) pendingRender = true; else render();
+}
+document.addEventListener('focusout', () => setTimeout(() => { if (pendingRender && !isEditing()) render(); }, 300));
+
+function syncArr(oldA, newA) {
+  const byId = new Map((oldA || []).map(x => [x.id, x]));
+  return newA.map(n => {
+    const o = byId.get(n.id);
+    if (!o) return n;
+    for (const k of Object.keys(o)) if (!(k in n)) delete o[k];
+    return Object.assign(o, n);
+  });
+}
+window.App = {
+  getDb: () => db,
+  normalize,
+  saveLocal,
+  toast,
+  confirmDialog,
+  applyRemote(nd) {
+    const before = JSON.stringify(db);
+    for (const k of Object.keys(nd)) {
+      if (['orders', 'statuses', 'products', 'peopleCols', 'roleCols'].includes(k)) db[k] = syncArr(db[k], nd[k]);
+      else if (k === 'settings') db.settings = Object.assign(db.settings || {}, nd.settings);
+      else db[k] = nd[k];
+    }
+    if (JSON.stringify(db) === before) return;
+    saveLocal();
+    if (state.auth === 'signedIn') softRender();
+  },
+  setAuth(s, email, error) {
+    state.auth = s;
+    if (email !== undefined) state.email = email || state.email;
+    state.authError = error || '';
+    if (s === 'signedOut') state.stack = [];
+    render();
+  },
+  setSyncInfo(t) { state.syncInfo = t; const el = document.getElementById('syncInfo'); if (el) el.textContent = t; },
+};
 
 const screens = {};
 
@@ -637,7 +745,7 @@ screens.earnEdit = (p, frame) => {
       });
       el.querySelector('#agPct').addEventListener('input', ev => { e.agencyPct = num(ev.target.value); dirty(); upd(); });
       upd();
-      el.querySelector('#earnForm').onsubmit = ev => { ev.preventDefault(); order.earn = e; save(); frame.dirty = false; state.stack.pop(); render(); toast('Збережено'); };
+      el.querySelector('#earnForm').onsubmit = ev => { ev.preventDefault(); const cur0 = db.orders.find(o => o.id === p.id); if (cur0) cur0.earn = e; save(); frame.dirty = false; state.stack.pop(); render(); toast('Збережено'); };
     },
   };
 };
@@ -836,8 +944,11 @@ screens.products = () => ({
 screens.settings = () => ({
   title: 'Налаштування',
   html: `<div class="stack">
+    ${CLOUD ? `<div class="section-title">Спільний доступ</div>
+    <div class="menu"><div class="mrow"><span class="grow">Ви увійшли як <b>${esc(state.email)}</b><br><span class="muted" style="font-size:13px" id="syncInfo">${esc(state.syncInfo)}</span></span></div>
+    <button id="logoutBtn"><span class="grow" style="color:var(--danger)">Вийти з акаунта</span></button></div>` : ''}
     <div class="section-title">Резервна копія</div>
-    <div class="note">Дані зберігаються лише на цьому пристрої. Регулярно робіть копію й зберігайте файл у «Файлах» або iCloud. Цей самий файл переносить усі дані на інший пристрій.</div>
+    <div class="note">${CLOUD ? 'Записи зберігаються в спільній базі, тож їх бачать усі, хто має доступ. Резервна копія — це додатковий файл на випадок помилки.' : 'Дані зберігаються лише на цьому пристрої.'} Регулярно робіть копію й зберігайте файл у «Файлах» або iCloud. Цей самий файл переносить усі дані на інший пристрій.</div>
     <button class="btn" id="exportBtn">Експорт резервної копії</button>
     <button class="btn secondary" id="importBtn">Імпорт резервної копії</button>
     <input type="file" id="importFile" accept=".json,application/json,text/plain" hidden>
@@ -860,6 +971,8 @@ screens.settings = () => ({
     el.querySelectorAll('[data-go]').forEach(b => b.onclick = () => push(b.dataset.go));
     el.querySelectorAll('#defCur [data-c]').forEach(b => b.onclick = () => { db.settings.currency = b.dataset.c; save(); render(); });
     el.querySelector('#exportBtn').onclick = exportBackup;
+    const lo = el.querySelector('#logoutBtn');
+    if (lo) lo.onclick = async () => { if (await confirmDialog({ title: 'Вийти з акаунта?', text: 'Щоб знову побачити записи, треба буде ввести пошту й пароль.', ok: 'Вийти', danger: true })) window.Sync.signOut(); };
     const fi = el.querySelector('#importFile');
     el.querySelector('#importBtn').onclick = () => fi.click();
     fi.addEventListener('change', () => { const f = fi.files[0]; fi.value = ''; if (f) importBackup(f); });
@@ -890,7 +1003,7 @@ function importBackup(file) {
     const data = parsed && parsed.data ? parsed.data : parsed;
     if (!data || !Array.isArray(data.orders)) { toast('У файлі немає замовлень. Виберіть файл резервної копії.'); return; }
     const when = parsed.exportedAt ? ` від ${longDate(parsed.exportedAt.slice(0, 10))}` : '';
-    if (!await confirmDialog({ title: 'Замінити дані з копії?', text: `У файлі${when}: ${data.orders.length} замовл. Поточні дані на цьому пристрої (${db.orders.length} замовл.) буде замінено.`, ok: 'Замінити', danger: true })) return;
+    if (!await confirmDialog({ title: 'Замінити дані з копії?', text: `У файлі${when}: ${data.orders.length} замовл. Поточні дані (${db.orders.length} замовл.) буде замінено${CLOUD ? ' у спільній базі, тобто і для інших користувачів' : ' на цьому пристрої'}.`, ok: 'Замінити', danger: true })) return;
     db = normalize(data); save(); state.stack = [{ name: 'settings', params: {} }]; render(); toast('Дані відновлено');
   };
   r.onerror = () => toast('Не вдалося прочитати файл');
@@ -936,6 +1049,7 @@ screens.listEdit = p => {
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => { state.tab = b.dataset.tab; state.stack = []; render(); window.scrollTo(0, 0); });
 document.getElementById('settingsBtn').onclick = () => push('settings');
 render();
+if (CLOUD) setTimeout(() => { if (!window.Sync && state.auth === 'loading') App.setAuth('loading', '', 'Не вдалося завантажити модуль синхронізації. Перевірте інтернет і відкрийте застосунок знову.'); }, 15000);
 
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
