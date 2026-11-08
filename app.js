@@ -184,6 +184,7 @@ const ICON = {
   x: '<svg viewBox="0 0 24 24" width="18" height="18"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>',
   pen: '<svg viewBox="0 0 24 24" width="17" height="17"><path d="M4 20h4L19 9l-4-4L4 16v4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>',
   pin: '<svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 21s-6.5-6.2-6.5-11a6.5 6.5 0 0 1 13 0c0 4.8-6.5 11-6.5 11z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="10" r="2.3" fill="currentColor"/></svg>',
+  cal: '<svg viewBox="0 0 24 24" width="25" height="25"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3.5 10h17M8 3v4M16 3v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="8.5" cy="14.5" r="1.3" fill="currentColor"/><circle cx="12" cy="14.5" r="1.3" fill="currentColor"/><circle cx="15.5" cy="14.5" r="1.3" fill="currentColor"/></svg>',
   check: '<svg viewBox="0 0 24 24" width="20" height="20"><path d="M5 12.5l4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 };
 
@@ -360,6 +361,7 @@ function render() {
   const left = document.getElementById('leftBtn');
   left.className = 'iconbtn';
   if (top) { left.innerHTML = ICON.back; left.setAttribute('aria-label', 'Назад'); left.onclick = pop; }
+  else if (state.tab === 'orders') { left.innerHTML = ICON.cal; left.setAttribute('aria-label', 'Календар'); left.onclick = () => push('calendar'); }
   else { left.innerHTML = ''; left.classList.add('invisible'); left.onclick = null; }
   const title = document.getElementById('title');
   title.hidden = false; title.textContent = res.title || TAB_TITLES[state.tab];
@@ -519,16 +521,30 @@ function toggleArchive(id) {
   toast(o.archived ? 'Перенесено в архів' : 'Повернуто з архіву', { label: 'Скасувати', run: () => { o.archived = !o.archived; save(); render(); window.scrollTo(0, y); } });
 }
 
+// Пошук: кожне слово запиту має знайтися. Число — це день місяця, 14.06 — день і місяць, 2026 — рік, слова — місяць, імена, організатор тощо.
+function matchSearch(o, q) {
+  const d = parseDate(o.date);
+  const text = [o.couple, o.organizer, o.location, o.pkg, o.photographer, o.host, o.comment,
+    d ? MONTHS[d.getMonth()] + ' ' + MONTHS_GEN[d.getMonth()] : ''].join(' ').toLowerCase();
+  return q.split(/\s+/).filter(Boolean).every(t => {
+    if (/^\d{4}$/.test(t)) return !!d && d.getFullYear() === +t;
+    if (/^\d{1,2}$/.test(t)) return !!d && d.getDate() === +t;
+    const m = /^(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?$/.exec(t);
+    if (m) return !!d && d.getDate() === +m[1] && d.getMonth() + 1 === +m[2] && (!m[3] || String(d.getFullYear()).endsWith(m[3]));
+    return text.includes(t);
+  });
+}
+
 function ordersBody() {
   const active = db.orders.filter(o => !o.archived);
   const archivedN = db.orders.length - active.length;
   const q = state.search.trim().toLowerCase();
   let body = '';
   if (q) {
-    const found = db.orders.filter(o => [o.couple, o.organizer, o.location, o.pkg, o.photographer, o.host].some(v => (v || '').toLowerCase().includes(q))).sort(sortAsc);
+    const found = db.orders.filter(o => matchSearch(o, q)).sort(sortAsc);
     body = found.length
       ? `<div class="box">${found.map(o => orderRow(o)).join('')}</div><div class="note">Пошук іде по всіх роках і по архіву.</div>`
-      : `<div class="empty"><b>Нічого не знайдено</b>Шукайте за іменами пари, організатором або локацією.</div>`;
+      : `<div class="empty"><b>Нічого не знайдено</b>Шукайте за датою (14, 14.06, червень, 2026), іменами пари, організатором, пакетом або локацією.</div>`;
   } else {
     const years = yearsIn(active);
     const nodate = active.filter(o => !o.date);
@@ -552,7 +568,7 @@ function mountOrdersBody(el) {
 
 screens.orders = () => ({
   html: `<div class="stack">
-    <div class="search">${ICON.search}<input type="search" id="orderSearch" placeholder="Пошук" value="${esc(state.search)}" autocomplete="off"></div>
+    <div class="search">${ICON.search}<input type="search" id="orderSearch" placeholder="Пошук: дата, імена, організатор" value="${esc(state.search)}" autocomplete="off"></div>
     <div class="stack" id="ordersBody">${ordersBody()}</div></div>`,
   mount(el) {
     const s = el.querySelector('#orderSearch');
@@ -719,6 +735,50 @@ screens.orderForm = (p, frame) => {
         db.orders = db.orders.filter(o => o.id !== p.id); save(); frame.dirty = false;
         state.stack.pop(); closeTop(); toast('Замовлення видалено');
       };
+    },
+  };
+};
+
+/* ================= КАЛЕНДАР ================= */
+screens.calendar = (p, frame) => {
+  const dated = db.orders.filter(o => o.date);
+  const byDate = new Map();
+  for (const o of dated) { if (!byDate.has(o.date)) byDate.set(o.date, []); byDate.get(o.date).push(o); }
+  const now = new Date(), cy = now.getFullYear();
+  const ys = [...yearsIn(dated), cy];
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const today = todayStr();
+  let html = '';
+  for (let y = minY; y <= maxY; y++) for (let m = 0; m < 12; m++) {
+    const first = new Date(y, m, 1), days = new Date(y, m + 1, 0).getDate();
+    const offset = (first.getDay() + 6) % 7; // тиждень з понеділка
+    let cells = '<span></span>'.repeat(offset);
+    let count = 0;
+    for (let dd = 1; dd <= days; dd++) {
+      const ds = ymd(new Date(y, m, dd));
+      const list = byDate.get(ds);
+      const wk = (offset + dd - 1) % 7 >= 5;
+      const cls = `cd${list ? ' has' : ''}${ds === today ? ' today' : ''}${wk ? ' wk' : ''}${ds < today ? ' past' : ''}`;
+      if (list) count += list.length;
+      cells += list ? `<button class="${cls}" data-date="${ds}" aria-label="${dd} ${MONTHS_GEN[m]}: ${esc(list.map(o => o.couple || 'замовлення').join(', '))}">${dd}${list.length > 1 ? `<i>${list.length}</i>` : ''}</button>` : `<span class="${cls}">${dd}</span>`;
+    }
+    html += `<section class="cal-m" id="m-${y}-${m}"><div class="cal-title">${MONTHS[m]} <span>${y}</span>${count ? `<em>${count} ${count === 1 ? 'весілля' : count < 5 ? 'весілля' : 'весіль'}</em>` : ''}</div><div class="cal-grid">${cells}</div></section>`;
+  }
+  return {
+    title: 'Календар',
+    html: `<div class="cal-week">${['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Нд'].map((d, i) => `<span${i >= 5 ? ' class="wk"' : ''}>${d}</span>`).join('')}</div>
+      <div class="cal">${html}</div>`,
+    mount(el) {
+      el.querySelectorAll('[data-date]').forEach(b => b.onclick = () => {
+        const list = byDate.get(b.dataset.date);
+        if (list.length === 1) { push('orderView', { id: list[0].id }); return; }
+        openSheet(`<h2>${esc(longDate(b.dataset.date))}</h2><div class="scroll">${list.map(o => `<button class="opt" data-id="${o.id}"><span class="grow"><b>${esc(o.couple || 'Без імен')}</b><br><span class="muted" style="font-size:14px">${esc([o.organizer, o.pkg].filter(Boolean).join(' · '))}</span></span>${ICON.chev}</button>`).join('')}</div>`,
+          (sh, close) => sh.querySelectorAll('[data-id]').forEach(x => x.onclick = () => { close(); push('orderView', { id: x.dataset.id }); }));
+      });
+      if (!frame.scrolled) {
+        frame.scrolled = true;
+        requestAnimationFrame(() => { const t = document.getElementById(`m-${cy}-${now.getMonth()}`); if (t) t.scrollIntoView({ block: 'start' }); });
+      }
     },
   };
 };
@@ -1164,6 +1224,9 @@ function jumpToCurrentYear() {
   if (target && ys[0] !== target) scrollToYear(target); else window.scrollTo(0, 0);
 }
 document.getElementById('settingsBtn').onclick = () => push('settings');
+// Точна висота шапки, щоб заголовки років і днів тижня прилипали без щілини
+function setHdr() { const h = document.querySelector('.topbar').getBoundingClientRect().height; document.documentElement.style.setProperty('--hdr', h + 'px'); }
+setHdr(); window.addEventListener('resize', setHdr);
 if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 render(); requestAnimationFrame(jumpToCurrentYear);
 let firstSignedIn = true;
